@@ -24,10 +24,12 @@
 static const char *TAG = "MQTT";
 
 /* ---------- 连接参数 ---------- */
-#define MQTT_URI        "mqtt://broker.emqx.io:1883"   /* broker 地址，IP 或域名 */
-#define MQTT_USERNAME   NULL                           /* 用户名，无认证填 NULL */
-#define MQTT_PASSWORD   NULL                           /* 密码，无认证填 NULL */
-#define MQTT_CLIENT_ID  "mqttx_6ff276f0"                 /* 客户端 ID，同一 broker 内要唯一 */
+#define MQTT_URI      "mqtt://broker.emqx.io:1883"
+#define MQTT_USERNAME NULL
+#define MQTT_PASSWORD NULL
+#define MQTT_CLIENT_ID "esp32_001"
+
+               /* 客户端 ID，同一 broker 内要唯一 */
 
 static esp_mqtt_client_handle_t s_client = NULL;
 static bool s_connected = false;
@@ -105,6 +107,12 @@ void mqtt_init(void)
         .credentials.username                 = MQTT_USERNAME,
         .credentials.authentication.password  = MQTT_PASSWORD,
         .credentials.client_id                = s_client_id,
+        /* 用 MQTT 5.0 连接，和 MQTTX 保持同一个版本，免得两边行为不一致。
+         * ★ 前提是 menuconfig 里 CONFIG_MQTT_PROTOCOL_5 已打开（见 sdkconfig）。
+         *   漏了那一步，esp-mqtt 会在 client_init 时直接报错拒绝启动：
+         *   "Please first enable MQTT_PROTOCOL_5 feature in menuconfig"
+         *   注意这和上面的 "v5.x" 不是一回事 —— 那个指 ESP-IDF 版本。 */
+        .session.protocol_ver                 = MQTT_PROTOCOL_V_5,
     };
 
     s_client = esp_mqtt_client_init(&cfg);
@@ -117,15 +125,14 @@ void mqtt_init(void)
     esp_mqtt_client_start(s_client);
 }
 
-void mqtt_publish(const char *topic, const char *payload, int qos)
+bool mqtt_publish(const char *topic, const char *payload, int qos)
 {
     if (s_client == NULL || !s_connected)
     {
         ESP_LOGW(TAG, "未连接，丢弃发布 [%s]", topic);
-        return;
+        return false;
     }
-    /* len=0 表示按 '\0' 结尾的字符串计算长度；retain=0 不保留 */
-    esp_mqtt_client_publish(s_client, topic, payload, 0, qos, 0);
+    return esp_mqtt_client_publish(s_client, topic, payload, 0, qos, 0) >= 0;
 }
 
 void mqtt_subscribe(const char *topic, int qos)

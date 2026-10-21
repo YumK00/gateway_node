@@ -23,16 +23,16 @@
   "idf.openOcdConfigs": [
     "board/esp32s3-builtin.cfg"
   ],
-  "idf.port": "COM17",
-  "idf.currentSetup": "C:\\Espressif\\.espressif\\v5.4.4\\esp-idf",
+  "idf.port": "COM19",
+  "idf.currentSetup": "C:\\esp\\v5.5.6\\esp-idf",
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32s3"
   },
-  "clangd.path": "C:\\Espressif\\tools\\esp-clang\\esp-18.1.2_20240912\\esp-clang\\bin\\clangd.exe",
+  "clangd.path": "C:\\Espressif\\tools\\esp-clang\\esp-19.1.2_20250312\\esp-clang\\bin\\clangd.exe",
   "clangd.arguments": [
     "--background-index",
     "--query-driver=**",
-    "--compile-commands-dir=c:\\Users\\Administrator\\ESP32Project\\sample_project\\build",
+    "--compile-commands-dir=${workspaceFolder}/build",
     "--enable-config"
   ],
   "idf.flashType": "JTAG",

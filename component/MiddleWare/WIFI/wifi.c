@@ -37,8 +37,8 @@
 
 static const char *TAG = "WIFI";
 
-#define WIFI_SSID "iPhone"
-#define WIFI_PASSWORD "kym123456"
+#define WIFI_SSID "kym123"
+#define WIFI_PASSWORD "88888888"
 
 #define DEFAULT_SCAN_LIST_SIZE 12
 

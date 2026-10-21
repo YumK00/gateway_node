@@ -12,5 +12,5 @@ add_compile_options(-fdiagnostics-color=always)
 # 引入ESP-IDF官方的cmake工程构建脚本，这是ESP-IDF核心必须语句
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
-# 定义项目名称为 sample_project，会影响生成固件等文件命名
-project(sample_project)
+# 定义项目名称为 gateway，会影响生成固件等文件命名
+project(gateway)

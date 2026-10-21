@@ -30,6 +30,7 @@
 #define TOPIC_ALERT_A      MQTT_PREFIX "/nodeA/alert"       /* ← CAN 0x011 ALARM_A   */
 #define TOPIC_ALERT_B      MQTT_PREFIX "/nodeB/alert"       /* ← CAN 0x012 ALARM_B   */
 #define TOPIC_STATUS_GW    MQTT_PREFIX "/gateway/status"    /* ← CAN 0x103 GW_STATUS */
+#define TOPIC_STATUS_STATS MQTT_PREFIX "/gateway/stats"     /* ← can_get_stats() 的四个累计值 */
 
 /* topic 要按目标节点拼出来，用这两个格式化宏：
  *   char t[48];
@@ -72,8 +73,10 @@
 /* 初始化并启动 MQTT 客户端（需在 WiFi 连上之后调用） */
 void mqtt_init(void);
 
-/* 发布一条消息。payload 以 '\0' 结尾；qos 取 MQTT_QOS_xxx */
-void mqtt_publish(const char *topic, const char *payload, int qos);
+/* 发布一条消息。payload 以 '\0' 结尾；qos 取 MQTT_QOS_xxx。
+ * 返回 true = 已经交给 esp-mqtt 发出去；false = 没发出去
+ * （没连上 broker，或者 esp-mqtt 内部失败）。 */
+bool mqtt_publish(const char *topic, const char *payload, int qos);
 
 /* 订阅一个主题；qos 取 MQTT_QOS_xxx */
 void mqtt_subscribe(const char *topic, int qos);

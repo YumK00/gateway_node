@@ -243,6 +243,7 @@
 #define ST_COMM_OK          (1u << 0)   /* bit0：和网关通信正常 */
 #define ST_THRESH           (1u << 1)   /* bit1：已触发阈值 */
 #define ST_ALARM            (1u << 2)   /* bit2：有报警未处理 */
+#define ST_ESTOP            (1u << 3)   /* bit3：急停中 */
 
 /* ESTOP 的 B0（急停动作） */
 #define ESTOP_ACTION_STOP   1u      /* 急停：立刻停机 */

@@ -26,7 +26,7 @@ dependencies:
   idf:
     source:
       type: idf
-    version: 5.4.4
+    version: 5.5.6
 direct_dependencies:
 - espressif/openai
 - idf
