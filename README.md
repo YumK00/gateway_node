@@ -169,50 +169,8 @@ gateway_node/
 | 采样点 | (1+13)/16 = **87.5%** | IDF 的 250 kbps 宏是 80%，与 STM32 的 87.5% 差 7.5%，混跑会通不了 |
 | 过滤器 / 驱动队列 | `TWAI_FILTER_CONFIG_ACCEPT_ALL()` / tx 5、rx 5 | 全收（只听心跳可只比较 `GRP_HEARTBEAT` 高 7 位）；队列用 `TWAI_GENERAL_CONFIG_DEFAULT` 默认值，代码未改 |
 
-## 七、构建与烧录
 
-依赖与版本（`main/idf_component.yml` 与 `dependencies.lock`）：
-
-| 项 | 版本 / 取值 | 依据 |
-|---|---|---|
-| ESP-IDF | `>=4.1.0`（manifest）/ **5.5.6**（lock 与 `.vscode` 的 `C:\esp\v5.5.6\esp-idf`） | `dependencies.lock` |
-| 目标芯片 | **esp32s3** | lock 的 `target:`、`.vscode` 的 `IDF_TARGET` 与 `board/esp32s3-builtin.cfg` |
-| espressif/openai | `1.1.0` | 声明了但代码未引用，会白下载一份依赖 |
-| espressif/cmake_utilities | `0.5.3` | openai 的传递依赖，`require: private` |
-
-```bash
-idf.py set-target esp32s3     # sdkconfig 未入库，必须自己生成
-idf.py menuconfig             # 必填项：Flash size=16 MB；Partition Table=Custom CSV→partitions-16MiB.csv；
-                              #         ESP-MQTT Config 勾选 MQTT 5.0（CONFIG_MQTT_PROTOCOL_5）；
-                              #         想看 TX 帧的 ESP_LOGD 就把 Log level 调到 Debug
-idf.py build
-idf.py -p COM19 flash monitor
-```
-
-分区表 `partitions-16MiB.csv`（合计正好 16 MB）：
-
-| 名称 | 类型/子类型 | 偏移 | 大小 | 用途 |
-|---|---|---|---|---|
-| `nvs` | data/nvs | `0x9000` | 24 KB | WiFi 校准数据等（`nvs_flash_init`） |
-| `phy-init` | data/phy | `0xF000` | 4 KB | RF 校准 |
-| `factory` | app/factory | `0x10000` | 1.9 MB | 应用固件；只有一个 app 分区，**没有 otadata，所以未启用 OTA** |
-| `vfs` | data/fat | `0x200000` | 10 MB | 预留给断网缓存（代码未挂载） |
-| `storage` | data/spiffs | `0xC00000` | 4 MB | 预留给配置文件/日志（代码未挂载） |
-
-开发环境（`.vscode` / `.clangd` / `.devcontainer`）：
-
-- `.vscode`：ESP-IDF 扩展常开、`C_Cpp.intelliSenseEngine` 关闭（改用 clangd）、`idf.port = COM19`、`idf.currentSetup = C:\esp\v5.5.6\esp-idf`、`idf.flashType = JTAG`、OpenOCD 用 `board/esp32s3-builtin.cfg`；clangd 指向 esp-clang 19.1.2，带 `--compile-commands-dir=${workspaceFolder}/build`，所以**必须先 `idf.py build` 一次**补全才正常。
-- `.clangd`：`CompileFlags.Remove: [-f*, -m*]`（去掉 GCC 专有参数）、`Diagnostics.UnusedIncludes: None`；`compile_commands.json` 与 `build/`、`sdkconfig` 一样被 `.gitignore` 排除，即**构建配置一律不入库**。
-- `.devcontainer`：`FROM espressif/idf:latest`，装 `udev`、`--privileged`，预装 `espressif.esp-idf-extension` 与 `esp-idf-web`；名字叫 "ESP-IDF QEMU"，但仓库里没有任何 QEMU 脚本。
-
-注意点：
-
-1. `sdkconfig` 不在仓库里，clone 下来必须自己 `set-target` + 设 16 MB Flash + 指分区表，否则会按默认 2 MB/4 MB 分区表烧，开机就可能找不到分区。
-2. 不开 `CONFIG_MQTT_PROTOCOL_5` 时 `esp_mqtt_client_init` 会报 "Please first enable MQTT_PROTOCOL_5" 并拒绝启动（`mqtt.c` 里明确注释了）。
-3. WiFi 凭据是 `wifi.c` 里的宏 `kym123` / `88888888`，换现场必须改代码重编，不是运行时配置。
-4. broker 是公共的 `mqtt://broker.emqx.io:1883`，匿名、无 TLS；多人共用同一主题前缀会互相串消息，正式用要换私有 broker 与 TLS。
-
-## 八、技术栈与技术亮点
+## 七、技术栈与技术亮点
 
 | 层次 | 技术 | 用途 |
 |---|---|---|
@@ -230,7 +188,7 @@ idf.py -p COM19 flash monitor
 - **日志按帧类型节流**：`can_log_allow()` 给 5 类帧各记一个时刻，每类最多 1 条/秒；`seen` 标志保证上电第一条一定打出来；`CAN_LOG_PERIOD_MS` 改 0 就变成逐帧调试。
 - **安全与统计的默认值设计**：急停解析失败一律按"停"处理（协议层写成"接收方硬性义务"）；`can.h` 写清重复帧与 A 重启两个会永久污染累计值的坑，并说明 `can_get_stats()` 为何按值返回。
 
-## 九、典型问题与排查
+## 八、典型问题与排查
 
 | 现象 | 根因 | 定位手法 | 处理 |
 |---|---|---|---|
@@ -238,23 +196,3 @@ idf.py -p COM19 flash monitor
 | **TX 全部超时、BUS_OFF 反复出现**：`TX 0x103 超时：总线忙或无人应答`，随后 `总线离线(BUS_OFF) 累计第 N 次`，A/B 收不到网关任何帧 | 发出的帧没有节点回 ACK，TEC 超过 255 触发 BUS_OFF。`can.c` 逐条列出：没接收发器 / 收发器没供电 / TX-RX 接反 / 没共地 / 对端没上电 / CANH-CANL 接反 / 终端电阻过多或缺失；用 TJA1050 这类 5 V 器件时还要注意 3.3 V 电平是否被识别为高 | 看 `can_service_bus_state()` 打出的 `总线错误 / 仲裁丢失 / 收错 / TEC / REC`：**`bus_error_count` 恒为 0 说明 RX 根本没看到线上电平变化**（查收发器供电、GPIO4→RXD、共地）；`arb_lost_count > 0` 说明能看到别人在发，问题在发送侧或 ACK；也可把 `CAN_MODE` 改成 `TWAI_MODE_LISTEN_ONLY` 单独验证接收（此模式 `twai_transmit` 直接返回不支持，`can_tx_task` 发了也没用） | 先修 RX 通路与共地，再确认两端各一个 120Ω；恢复不必重启：`BUS_OFF → twai_initiate_recovery() → RECOVERING → STOPPED → twai_start()` 会自动重来，接线一好下一秒就恢复 |
 | **A 节点丢帧数暴涨**：`a_lost` 单次增加 255，或 `A seq 跳变 200 → 0 (55 帧)` 后丢包率算出大于 100% | ① CAN 硬件自动重发产生**重复帧**，`seq` 与上一帧相同，而 `PROTO_SeqLost(x, x)` 结果是 255 不是 0；② A 重启后 `seq` 从 0 重来，被当成一次巨大跳变 | 看两条 WARN：`A 节点数据丢帧 N 个 (seq a → b)`（真丢帧）与 `A seq 跳变 a → b (N 帧)，判为疑似重启，不计入丢包`（被阈值挡掉）；255 反复出现即漏判重复帧 | 先判 `s.seq != s_last_seq` 再算差值；`lost >= A_LOST_RESET_MAX(10)`（A 是 100 ms 一帧，10 ≈ 1 秒）判为疑似重启不计入，只有 1~9 才累加。`seq` 只有 8 位且帧里没有 `boot_id`，重启与长断线无法严格区分，只能用阈值近似（`can.h` 已注明） |
 | **WiFi 掉线后重连日志自相矛盾**：总是 `第1次连接失败` + 固定 15 s 后的 `连接 X 超时（15000 ms）`，但网络其实通了；同一次断开打两遍日志 | `wifi_event_handler` 在 `WIFI_EVENT_STA_DISCONNECTED` 回调里**同步**调 `wifi_connect()`，而它用 `xEventGroupWaitBits` 阻塞 15 s；回调占着事件循环任务，期间 `IP_EVENT_STA_GOT_IP` 派发不出去，必然走超时分支。另外 `wifi_connect()` 入口把 `s_retry_num` 清 0（永远是"第 1 次"），`WIFI_FAIL_BIT` 从未被 `Set`（死代码），`disc` 取了两次 | 看时间戳：`断开连接` 与 `拿到 IP` 之间恒为 15 s；或断点停在 `xEventGroupWaitBits` 看调用栈来自事件循环任务 | 回调里只置位/置标志，重连交给独立任务或定时器（或开 `esp_wifi_set_auto_reconnect`），重试计数移到回调里维护并设上限 |
-
-**占位值与已知不一致（如实记录）**：`can.c` 的 `PROTO_PackGwStatus(..., 12345)` 中 `cache_cnt` 是写死的可疑占位值（注释："本项目还没做断网缓存，先填 12345"），而 `wifitask.c` 的 `gateway/status` 里 `cache` 固定为 `0`——同一信息两个出口说法不一致，`0x103` 的 B2-B3 不能当真实积压量用。此外：`mqtt.c` 的 `MQTT_CLIENT_ID "esp32_001"` 定义了但未使用（真正用的是 MAC 后三字节拼的 `esp32s3_xxxxxx`）；`mqtt.h` 注释里的主题示例写 `gw/...`，实际前缀宏是 `gw0805`；无 SNTP，所有 MQTT 负载都没有时间戳；`0x000` 急停只记日志不上报云端；`main/idf_component.yml` 保留模板的 `espressif/openai` 依赖但代码里没有 AI 调用。
-
-## 十、相关仓库与备注
-
-| 仓库 | 平台 | 节点号 | 说明 |
-|---|---|---|---|
-| [gateway_node](https://github.com/YumK00/gateway_node)（本仓库） | ESP32-S3 / ESP-IDF | `NODE_GW=3` | CAN ⇄ WiFi/MQTT 双向桥、判活、统计、状态灯 |
-| [collecton_node](https://github.com/YumK00/collecton_node) | STM32F103 / FreeRTOS | `NODE_A=1` | 红外/光敏采集，100 ms 发 `0x101`，1 s 心跳，OLED 显示 |
-| [control_node](https://github.com/YumK00/control_node) | STM32F103 / FreeRTOS | `NODE_B=2` | 电机/PWM/PID 执行，发 `0x102`，3 s 收不到 `0x703` 即停车 |
-| [v_car](https://github.com/YumK00/v_car) | Qt (C++) | — | 独立项目：车载域 T-Box 仿真，自有 `car/ecu/*` 主题与 Broker，不接入本链路 |
-| [weather_bureau](https://github.com/YumK00/weather_bureau) | Linux C++ | — | 独立项目：气象数据开放平台（Linux C++ 后端） |
-
-备注：
-
-- **协议只有一份**：本仓库 `component/MiddleWare/PROTOCOL/protocol.h` 与两个 STM32 仓库的 `Core/Inc/protocol.h` 逐字节相同（SHA256 `4693F79…`）；改协议遵循"只增不改"，两端都升级完再停用旧字段。
-- **对端行为约定**：B 把 `0x703` 当作电机保活（3 s 超时即停车），所以这一帧是**每秒无条件发**的；不要再加"重发最后一条电机命令"的机制，也别让 `cid` 兼职保活。
-- **上电顺序**：CAN 先于 MQTT 就绪，开机头几秒的遥测会被 `pub_telemetry` 丢弃并计入 `pub_lost`，这是设计取舍而非故障。
-- **未包含**：`sdkconfig`、`build/`、`managed_components/`、`compile_commands.json` 均被 `.gitignore` 排除；`partitions-16MiB.csv` 虽入库，仍需在 menuconfig 里手动指过去。
-- **后续阶段**：断网本地缓存（`vfs`/`storage` 已预留）、SNTP 校时给负载加时间戳、MQTT 遗嘱与 retained 策略、OTA（需新增 `otadata` 与 `ota_0/ota_1`）、UDS 诊断 `0x7E0/0x7E8`、以及让状态灯真正反映 WiFi/MQTT/CAN 三态。
