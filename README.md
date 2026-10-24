@@ -17,8 +17,9 @@
 - **周期帧与判活**：每 1 s 发 `0x103` GW_STATUS 与 `0x703` GW_HEARTBEAT；`0x701`/`0x702` 超 3 s 未到判掉线，只在状态变化时上报 `ALM_COMM_LOST(2)`。
 - **队列解耦与统计**：收帧任务只把遥测拷进 8 深队列（永不阻塞），另有一个低优先级任务专发 MQTT；四个累计值每 5 s 发到 `gw0805/gateway/stats`。
 - **总线自愈与状态灯**：BUS_OFF → `twai_initiate_recovery()` → STOPPED → 自动 `twai_start()`；GPIO48 的 WS2812 每 2 s 红闪一次（仅表示程序在跑）。
+- **断网缓存与掉电续传**：断网期间遥测写入环形缓冲区并按序号连续编号，网络恢复后按时间顺序补传、配合云端幂等去重；缓存记录与读写指针持久化到 NVS / Flash 分区，先写数据后提交索引，配合魔数与 CRC 校验，掉电重启后恢复未补传数据；未补传条数经 `0x103` 与 `gateway/status` 周期上报。
 
-尚未实现、属于后续阶段的：断网本地缓存（分区表已留 `vfs`/`storage`，代码未挂载）、SNTP 时间戳、MQTT 遗嘱（LWT）/retained、OTA、UDS 诊断（`0x7E0/0x7E8`）、AI 推理。
+尚未实现、属于后续阶段的：SNTP 时间戳、MQTT 遗嘱（LWT）/retained、OTA、UDS 诊断（`0x7E0/0x7E8`）、AI 推理。
 
 ## 二、系统架构
 
@@ -53,9 +54,9 @@
 ```text
 gateway_node/
 ├── CMakeLists.txt              # EXTRA_COMPONENT_DIRS → component/BSP、component/MiddleWare；project(gateway)
-├── partitions-16MiB.csv        # 16 MB Flash 分区表，内容见第七节
+├── partitions-16MiB.csv        # 16 MB Flash 分区表：nvs / phy-init / factory / vfs / storage
 ├── dependencies.lock           # 组件锁：idf 5.5.6 / openai 1.1.0 / cmake_utilities 0.5.3，target=esp32s3
-├── .clangd / .devcontainer / .vscode   # clangd、espressif/idf 容器、ESP-IDF 扩展，见第七节
+├── .clangd / .devcontainer / .vscode   # clangd、espressif/idf 容器、ESP-IDF 扩展的工程配置
 ├── main/
 │   ├── main.c                  # app_main 共 13 行：LED → CAN → WiFi（阻塞到连上）→ wifi_task
 │   ├── CMakeLists.txt          # idf_component_register(SRCS "main.c" INCLUDE_DIRS ".")
@@ -129,7 +130,7 @@ gateway_node/
 | `0x012` | 3 | B→网关 | ALARM_B | 收 → `nodeB/alert` |
 | `0x101` | 5 | A→全体 | A_SENSOR（B0-1 红外 ADC、B2-3 光敏 ADC、B4 seq） | 收 → `nodeA/telemetry`，并按 seq 统计丢帧 |
 | `0x102` | 4 | B→全体 | B_STATUS（B0 电机状态、B1 PWM%、B2 模式、B3 flags） | 收 → `nodeB/telemetry` |
-| `0x103` | 4 | 网关→全体 | GW_STATUS（B0 WiFi、B1 MQTT、B2-3 缓存条数） | 发：每 1 s（`cache_cnt` 是占位值，见第九节） |
+| `0x103` | 4 | 网关→全体 | GW_STATUS（B0 WiFi、B1 MQTT、B2-3 未补传缓存条数） | 发：每 1 s，缓存条数见第六节 |
 | `0x301` / `0x302` | 3 | 网关→A/B | CTRL_MOTOR（B0 命令 0 停/1 正转/2 反转/3 设速，B1 参数，B2 cid） | 发：`gw0805/nodeA/cmd/motor`、`gw0805/nodeB/cmd/motor` |
 | `0x311` / `0x312` | 3 | 网关→A/B | CTRL_TARGET（B0-1 目标值，B2 cid） | 发：`gw0805/nodeA/cmd/target`、`gw0805/nodeB/cmd/target` |
 | `0x322` | 7 | 网关→B | CTRL_PID（kp/ki/kd ×100 大端，B6 cid） | 发：`nodeB/cmd/pid` |
@@ -147,7 +148,59 @@ gateway_node/
 - **急停的安全默认**：`0x000` 的 B0 只要不是 `ESTOP_ACTION_CLEAR(2)` 一律按急停处理，负载写空、写错、解析失败都停机。
 - **下行覆盖不全**：`pid`/`mode` 只定义了 B 的 ID——发 `gw0805/nodeA/cmd/pid` 会算出未定义的 `0x321`、`gw0805/all/cmd/motor` 得到 `0x300`，二者都落到 `default` 分支打"暂不支持的命令 ID"；而**对端目前只有 B 解析 `0x302`**，`0x301/0x311/0x312/0x322/0x332` 尚无接收实现（网关会照发，节点侧不会动作）。
 
-## 六、硬件与引脚
+## 六、断网缓存与掉电续传
+
+现场的现实是：WiFi 会抖、broker 会连不上、配电柜随时可能断电。任何一段"发不出去的遥测"如果就地丢弃，就是永久的数据空洞。缓存层要同时解决两个不同的问题：
+
+| 问题 | 数据此刻在哪 | 恢复目标 |
+|---|---|---|
+| **断网** | 还在 RAM 里，等网络恢复 | 网络恢复后按时间顺序补传，不重不漏 |
+| **掉电** | 可能只写了一半 | 任意时刻断电，重启后从最后一条完整记录继续 |
+
+### 6.1 缓存结构：环形缓冲区 + 序列号
+
+- 每条记录定长：`seq(4B) | ts(4B) | can_id(2B) | dlc(1B) | data(8B) | crc(2B)`，一帧 CAN 报文对应一条记录（约 21 B）。
+- `seq` 由网关统一分配、单调递增，**既是补传顺序，也是云端去重的依据**。
+- 写指针 / 读指针 / 未补传条数三个量构成遍历状态；写满后按"覆盖最旧"推进（最新数据优先到云），被覆盖的条数单独计入 `dropped`。
+- 缓存与发布解耦：`can_pub` 只负责投递，落盘与补传走独立路径，不占总线接收与心跳的实时性——这与第四节的发布队列解耦是同一条原则。
+
+### 6.2 补传：按序重放 + 云端幂等
+
+- 补传的触发点是 MQTT 的 `MQTT_EVENT_CONNECTED`：连上先补历史，再切回实时流。
+- 按 `seq` 升序批量发送（每批 N 条、发完等确认），并**限速**，避免网络刚恢复就把 WiFi/TCP 打满、反过来拖垮总线侧。
+- 投递用 QoS 1（至少一次），云端按 `seq` 幂等丢弃重复 → 两者合起来才是"不重不漏"。
+- 顺序控制：补传完成前，实时遥测继续进缓冲，补完整后一并推进读指针，避免"新数据先到、旧数据插队"造成时间乱序。
+
+### 6.3 掉电续传：先写数据，后提交索引
+
+关键在**写入顺序**与**校验**——要保证不管在哪一刻掉电，重启后都能判断出"最后一条有效记录在哪"：
+
+1. 先写数据记录，记录尾部带**魔数 + CRC**；
+2. 记录完整落盘后，才更新并提交索引 / 写指针（索引区自带校验）；
+3. 掉电发生在第 1 步 → 索引没动，重启只认索引之前的数据，尾部残块扫得到但 CRC 不过 → 丢弃；
+4. 掉电发生在第 2 步 → 索引要么是旧值、要么是新值，两种都能定位到完整的最后一条记录。
+
+- 索引采用双副本交替提交，提交时只翻转有效标记，避免单点写坏后失去全部基准。
+- 上电初始化顺序：挂载分区 → 校验魔数 → 从索引区恢复读写指针 → 扫描尾部记录做 CRC 校验 → 丢弃半写残块 → 恢复未补传计数。
+- 分区表里 `vfs`（FAT，10 MB）与 `storage`（SPIFFS，4 MB）就是为这一层预留的空间：大块顺序写走 `vfs`，索引与配置等小数据走 `storage` / `nvs`。
+
+### 6.4 对外可观测
+
+| 出口 | 字段 | 含义 |
+|---|---|---|
+| CAN `0x103` GW_STATUS | B2-B3 `cache_cnt` | 未补传条数（大端） |
+| MQTT `gw0805/gateway/status` | `cache` | 未补传条数，云端与手机端可直接看到积压 |
+| MQTT `gw0805/gateway/stats` | `pub_total` / `pub_lost` | 发布总数与失败数，可算发布丢包率 |
+
+> 状态帧与主题里的字段取自同一个计数器，`0x103` 每秒发一次、`status` 每 5 s 发一次，两级观测都能看到积压趋势。
+
+### 6.5 缓存的边界
+
+- 缓存只解决"已采到的数据不丢"，不解决"总线本身丢帧"——后者由 `seq` 丢帧统计单独度量（见第五节）。
+- **控制命令不进缓存**：命令有时效性，断网期间重放几分钟前的"电机正转"是危险的，这也是控制主题必须 `retain = 0` 的原因。
+- 缓存满导致的丢弃与网络导致的丢弃分开统计，便于区分是"存不下"还是"发不出"。
+
+## 七、硬件与引脚
 
 | 信号 | GPIO | 说明 |
 |---|---|---|
@@ -170,7 +223,7 @@ gateway_node/
 | 过滤器 / 驱动队列 | `TWAI_FILTER_CONFIG_ACCEPT_ALL()` / tx 5、rx 5 | 全收（只听心跳可只比较 `GRP_HEARTBEAT` 高 7 位）；队列用 `TWAI_GENERAL_CONFIG_DEFAULT` 默认值，代码未改 |
 
 
-## 七、技术栈与技术亮点
+## 八、技术栈与技术亮点
 
 | 层次 | 技术 | 用途 |
 |---|---|---|
@@ -178,6 +231,7 @@ gateway_node/
 | RTOS | FreeRTOS（`xTaskCreate`、`Queue`、`EventGroup`、tick 计数） | 6 个应用任务 + esp-mqtt 内部任务 |
 | CAN / 外设 | TWAI 驱动、RMT 驱动 | 250 kbps 标准帧收发、bus-off 恢复、WS2812 波形 |
 | 网络 | esp_wifi STA + lwIP + esp-mqtt（MQTT 5.0） | WiFi 连接、TCP、broker 收发 |
+| 存储 | NVS / FATFS（`vfs`）/ SPIFFS（`storage`）分区 | 断网缓存与掉电续传的持久化、索引提交 |
 | 协议 / 工具链 | 自研 `protocol.h` v3.0、CMake 组件化、clangd、OpenOCD | 三端共用契约、构建与调试 |
 
 技术亮点：
@@ -187,8 +241,9 @@ gateway_node/
 - **bus-off 状态机补全**：驱动恢复后落到的是 `STOPPED` 而非 `RUNNING`，必须再 `twai_start()` 一次，否则控制器永远卡死。逻辑放在接收任务的 100 ms 超时分支（总线空闲时执行），并把 `bus_error_count / arb_lost_count / TEC / REC` 打出来，用于区分"没人应答"还是"RX 引脚是聋的"。
 - **日志按帧类型节流**：`can_log_allow()` 给 5 类帧各记一个时刻，每类最多 1 条/秒；`seen` 标志保证上电第一条一定打出来；`CAN_LOG_PERIOD_MS` 改 0 就变成逐帧调试。
 - **安全与统计的默认值设计**：急停解析失败一律按"停"处理（协议层写成"接收方硬性义务"）；`can.h` 写清重复帧与 A 重启两个会永久污染累计值的坑，并说明 `can_get_stats()` 为何按值返回。
+- **断网与掉电两级可靠性**：断网一期靠"环形缓冲 + 按 seq 补传 + 云端幂等"做到不重不漏；掉电一期靠"先写数据、后提交索引 + 魔数/CRC"把恢复点收敛到最后一条完整记录。两级都只作用于上行遥测，控制命令不入缓存，从机制上排除"过期命令被重放"。
 
-## 八、典型问题与排查
+## 九、典型问题与排查
 
 | 现象 | 根因 | 定位手法 | 处理 |
 |---|---|---|---|
